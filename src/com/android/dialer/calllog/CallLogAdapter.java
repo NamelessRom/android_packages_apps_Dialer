@@ -22,16 +22,12 @@ import android.content.Intent;
 import android.content.res.Resources;
 import android.database.Cursor;
 import android.net.Uri;
-import android.os.Handler;
-import android.os.Message;
 import android.provider.CallLog.Calls;
-import android.provider.ContactsContract.PhoneLookup;
 import android.text.TextUtils;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewStub;
-import android.view.ViewTreeObserver;
 import android.widget.ImageView;
 import android.widget.TextView;
 
@@ -41,7 +37,7 @@ import com.android.contacts.common.util.UriUtils;
 import com.android.dialer.PhoneCallDetails;
 import com.android.dialer.PhoneCallDetailsHelper;
 import com.android.dialer.R;
-import com.android.dialer.util.ExpirableCache;
+import com.android.dialer.calllog.CallLogAdapterHelper.NumberWithCountryIso;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Objects;
 
@@ -51,124 +47,18 @@ import java.util.LinkedList;
  * Adapter class to fill in data for the Call Log.
  */
 public class CallLogAdapter extends GroupingListAdapter
-        implements ViewTreeObserver.OnPreDrawListener, CallLogGroupBuilder.GroupCreator {
+        implements CallLogAdapterHelper.Callback, CallLogGroupBuilder.GroupCreator {
 
     /** Interface used to initiate a refresh of the content. */
     public interface CallFetcher {
         public void fetchCalls();
     }
 
-    /**
-     * Stores a phone number of a call with the country code where it originally occurred.
-     * <p>
-     * Note the country does not necessarily specifies the country of the phone number itself, but
-     * it is the country in which the user was in when the call was placed or received.
-     */
-    private static final class NumberWithCountryIso {
-        public final String number;
-        public final String countryIso;
-
-        public NumberWithCountryIso(String number, String countryIso) {
-            this.number = number;
-            this.countryIso = countryIso;
-        }
-
-        @Override
-        public boolean equals(Object o) {
-            if (o == null) return false;
-            if (!(o instanceof NumberWithCountryIso)) return false;
-            NumberWithCountryIso other = (NumberWithCountryIso) o;
-            return TextUtils.equals(number, other.number)
-                    && TextUtils.equals(countryIso, other.countryIso);
-        }
-
-        @Override
-        public int hashCode() {
-            return (number == null ? 0 : number.hashCode())
-                    ^ (countryIso == null ? 0 : countryIso.hashCode());
-        }
-    }
-
-    /** The time in millis to delay starting the thread processing requests. */
-    private static final int START_PROCESSING_REQUESTS_DELAY_MILLIS = 1000;
-
-    /** The size of the cache of contact info. */
-    private static final int CONTACT_INFO_CACHE_SIZE = 100;
-
     protected final Context mContext;
     private final ContactInfoHelper mContactInfoHelper;
     private final CallFetcher mCallFetcher;
-    private ViewTreeObserver mViewTreeObserver = null;
-
-    /**
-     * A cache of the contact details for the phone numbers in the call log.
-     * <p>
-     * The content of the cache is expired (but not purged) whenever the application comes to
-     * the foreground.
-     * <p>
-     * The key is number with the country in which the call was placed or received.
-     */
-    private ExpirableCache<NumberWithCountryIso, ContactInfo> mContactInfoCache;
-
-    /**
-     * A request for contact details for the given number.
-     */
-    private static final class ContactInfoRequest {
-        /** The number to look-up. */
-        public final String number;
-        /** The country in which a call to or from this number was placed or received. */
-        public final String countryIso;
-        /** The cached contact information stored in the call log. */
-        public final ContactInfo callLogInfo;
-
-        public ContactInfoRequest(String number, String countryIso, ContactInfo callLogInfo) {
-            this.number = number;
-            this.countryIso = countryIso;
-            this.callLogInfo = callLogInfo;
-        }
-
-        @Override
-        public boolean equals(Object obj) {
-            if (this == obj) return true;
-            if (obj == null) return false;
-            if (!(obj instanceof ContactInfoRequest)) return false;
-
-            ContactInfoRequest other = (ContactInfoRequest) obj;
-
-            if (!TextUtils.equals(number, other.number)) return false;
-            if (!TextUtils.equals(countryIso, other.countryIso)) return false;
-            if (!Objects.equal(callLogInfo, other.callLogInfo)) return false;
-
-            return true;
-        }
-
-        @Override
-        public int hashCode() {
-            final int prime = 31;
-            int result = 1;
-            result = prime * result + ((callLogInfo == null) ? 0 : callLogInfo.hashCode());
-            result = prime * result + ((countryIso == null) ? 0 : countryIso.hashCode());
-            result = prime * result + ((number == null) ? 0 : number.hashCode());
-            return result;
-        }
-    }
-
-    /**
-     * List of requests to update contact details.
-     * <p>
-     * Each request is made of a phone number to look up, and the contact info currently stored in
-     * the call log for this number.
-     * <p>
-     * The requests are added when displaying the contacts and are processed by a background
-     * thread.
-     */
-    private final LinkedList<ContactInfoRequest> mRequests;
 
     private boolean mLoading = true;
-    private static final int REDRAW = 1;
-    private static final int START_THREAD = 2;
-
-    private QueryThread mCallerIdThread;
 
     /** Instance of helper class for managing views. */
     private final CallLogListItemHelper mCallLogViewsHelper;
@@ -180,8 +70,7 @@ public class CallLogAdapter extends GroupingListAdapter
     /** Helper to group call log entries. */
     private final CallLogGroupBuilder mCallLogGroupBuilder;
 
-    /** Can be set to true by tests to disable processing of requests. */
-    private volatile boolean mRequestProcessingDisabled = false;
+    private final CallLogAdapterHelper mAdapterHelper;
 
     /** True if CallLogAdapter is created from the PhoneFavoriteFragment, where the primary
      * action should be set to call a number instead of opening the detail page. */
@@ -217,34 +106,6 @@ public class CallLogAdapter extends GroupingListAdapter
         }
     }
 
-    @Override
-    public boolean onPreDraw() {
-        // We only wanted to listen for the first draw (and this is it).
-        unregisterPreDrawListener();
-
-        // Only schedule a thread-creation message if the thread hasn't been
-        // created yet. This is purely an optimization, to queue fewer messages.
-        if (mCallerIdThread == null) {
-            mHandler.sendEmptyMessageDelayed(START_THREAD, START_PROCESSING_REQUESTS_DELAY_MILLIS);
-        }
-
-        return true;
-    }
-
-    private Handler mHandler = new Handler() {
-        @Override
-        public void handleMessage(Message msg) {
-            switch (msg.what) {
-                case REDRAW:
-                    notifyDataSetChanged();
-                    break;
-                case START_THREAD:
-                    startRequestProcessing();
-                    break;
-            }
-        }
-    };
-
     public CallLogAdapter(Context context, CallFetcher callFetcher,
             ContactInfoHelper contactInfoHelper, boolean useCallAsPrimaryAction,
             boolean isCallLog) {
@@ -256,14 +117,13 @@ public class CallLogAdapter extends GroupingListAdapter
         mUseCallAsPrimaryAction = useCallAsPrimaryAction;
         mIsCallLog = isCallLog;
 
-        mContactInfoCache = ExpirableCache.create(CONTACT_INFO_CACHE_SIZE);
-        mRequests = new LinkedList<ContactInfoRequest>();
-
         Resources resources = mContext.getResources();
         CallTypeHelper callTypeHelper = new CallTypeHelper(resources);
 
         mContactPhotoManager = ContactPhotoManager.getInstance(mContext);
         mPhoneNumberHelper = new PhoneNumberHelper(resources);
+        mAdapterHelper = new CallLogAdapterHelper(context, this,
+                contactInfoHelper, mPhoneNumberHelper);
         PhoneCallDetailsHelper phoneCallDetailsHelper = new PhoneCallDetailsHelper(
                 resources, callTypeHelper, new PhoneNumberUtilsWrapper());
         mCallLogViewsHelper =
@@ -563,42 +423,8 @@ public class CallLogAdapter extends GroupingListAdapter
         }
 
         // Lookup contacts with this number
-        NumberWithCountryIso numberCountryIso = new NumberWithCountryIso(number, countryIso);
-        ExpirableCache.CachedValue<ContactInfo> cachedInfo =
-                mContactInfoCache.getCachedValue(numberCountryIso);
-        ContactInfo info = cachedInfo == null ? null : cachedInfo.getValue();
-        if (!PhoneNumberUtilsWrapper.canPlaceCallsTo(number, numberPresentation)
-                || new PhoneNumberUtilsWrapper().isVoicemailNumber(number)) {
-            // If this is a number that cannot be dialed, there is no point in looking up a contact
-            // for it.
-            info = ContactInfo.EMPTY;
-        } else if (cachedInfo == null) {
-            mContactInfoCache.put(numberCountryIso, ContactInfo.EMPTY);
-            // Use the cached contact info from the call log.
-            info = cachedContactInfo;
-            // The db request should happen on a non-UI thread.
-            // Request the contact details immediately since they are currently missing.
-            enqueueRequest(number, countryIso, cachedContactInfo, true);
-            // We will format the phone number when we make the background request.
-        } else {
-            if (cachedInfo.isExpired()) {
-                // The contact info is no longer up to date, we should request it. However, we
-                // do not need to request them immediately.
-                enqueueRequest(number, countryIso, cachedContactInfo, false);
-            } else  if (!callLogInfoMatches(cachedContactInfo, info)) {
-                // The call log information does not match the one we have, look it up again.
-                // We could simply update the call log directly, but that needs to be done in a
-                // background thread, so it is easier to simply request a new lookup, which will, as
-                // a side-effect, update the call log.
-                enqueueRequest(number, countryIso, cachedContactInfo, false);
-            }
-
-            if (info == ContactInfo.EMPTY) {
-                // Use the cached contact info from the call log.
-                info = cachedContactInfo;
-            }
-        }
-
+        final ContactInfo info = mAdapterHelper.lookupContact(
+                number, numberPresentation, countryIso, cachedContactInfo);
         final Uri lookupUri = info.lookupUri;
         final String name = info.name;
         final int ntype = info.type;
@@ -636,10 +462,7 @@ public class CallLogAdapter extends GroupingListAdapter
                 getText());
 
         // Listen for the first draw
-        if (mViewTreeObserver == null) {
-            mViewTreeObserver = view.getViewTreeObserver();
-            mViewTreeObserver.addOnPreDrawListener(this);
-        }
+        mAdapterHelper.registerOnPreDrawListener(view);
 
         bindBadge(view, info, details, callType);
     }
@@ -745,17 +568,14 @@ public class CallLogAdapter extends GroupingListAdapter
         return mNumMissedCalls;
     }
 
-    /** Checks whether the contact info from the call log matches the one from the contacts db. */
-    private boolean callLogInfoMatches(ContactInfo callLogInfo, ContactInfo info) {
-        // The call log only contains a subset of the fields in the contacts db.
-        // Only check those.
-        return TextUtils.equals(callLogInfo.name, info.name)
-                && callLogInfo.type == info.type
-                && TextUtils.equals(callLogInfo.label, info.label);
+    @Override
+    public void dataSetChanged() {
+        notifyDataSetChanged();
     }
 
     /** Stores the updated contact info in the call log if it is different from the current one. */
-    private void updateCallLogContactInfoCache(String number, String countryIso,
+    @Override
+    public void updateContactInfo(String number, String countryIso,
             ContactInfo updatedInfo, ContactInfo callLogInfo) {
         final ContentValues values = new ContentValues();
         boolean needsUpdate = false;
@@ -875,13 +695,18 @@ public class CallLogAdapter extends GroupingListAdapter
      */
     @VisibleForTesting
     void disableRequestProcessingForTest() {
-        mRequestProcessingDisabled = true;
+        mAdapterHelper.disableRequestProcessingForTest();
     }
 
     @VisibleForTesting
     void injectContactInfoForTest(String number, String countryIso, ContactInfo contactInfo) {
-        NumberWithCountryIso numberCountryIso = new NumberWithCountryIso(number, countryIso);
-        mContactInfoCache.put(numberCountryIso, contactInfo);
+        mAdapterHelper.injectContactInfoForTest(number, countryIso, contactInfo);
+    }
+
+    @VisibleForTesting
+    void enqueueRequest(String number, String countryIso, ContactInfo callLogInfo,
+            boolean immediate) {
+        mAdapterHelper.enqueueRequest(number, countryIso, callLogInfo, immediate);
     }
 
     @Override
@@ -889,42 +714,15 @@ public class CallLogAdapter extends GroupingListAdapter
         super.addGroup(cursorPosition, size, expanded);
     }
 
-    /*
-     * Get the number from the Contacts, if available, since sometimes
-     * the number provided by caller id may not be formatted properly
-     * depending on the carrier (roaming) in use at the time of the
-     * incoming call.
-     * Logic : If the caller-id number starts with a "+", use it
-     *         Else if the number in the contacts starts with a "+", use that one
-     *         Else if the number in the contacts is longer, use that one
-     */
+    public void stopRequestProcessing() {
+        mAdapterHelper.stopRequestProcessing();
+    }
+
+    public void invalidateCache() {
+        mAdapterHelper.invalidateCache();
+    }
+
     public String getBetterNumberFromContacts(String number, String countryIso) {
-        String matchingNumber = null;
-        // Look in the cache first. If it's not found then query the Phones db
-        NumberWithCountryIso numberCountryIso = new NumberWithCountryIso(number, countryIso);
-        ContactInfo ci = mContactInfoCache.getPossiblyExpired(numberCountryIso);
-        if (ci != null && ci != ContactInfo.EMPTY) {
-            matchingNumber = ci.number;
-        } else {
-            try {
-                Cursor phonesCursor = mContext.getContentResolver().query(
-                        Uri.withAppendedPath(PhoneLookup.CONTENT_FILTER_URI, number),
-                        PhoneQuery._PROJECTION, null, null, null);
-                if (phonesCursor != null) {
-                    if (phonesCursor.moveToFirst()) {
-                        matchingNumber = phonesCursor.getString(PhoneQuery.MATCHED_NUMBER);
-                    }
-                    phonesCursor.close();
-                }
-            } catch (Exception e) {
-                // Use the number from the call log
-            }
-        }
-        if (!TextUtils.isEmpty(matchingNumber) &&
-                (matchingNumber.startsWith("+")
-                        || matchingNumber.length() > number.length())) {
-            number = matchingNumber;
-        }
-        return number;
+        return mAdapterHelper.getBetterNumberFromContacts(number, countryIso);
     }
 }

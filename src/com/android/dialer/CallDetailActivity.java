@@ -47,15 +47,12 @@ import android.view.LayoutInflater;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
-import android.widget.ImageButton;
-import android.widget.ImageView;
 import android.widget.ListView;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import com.android.contacts.common.ContactPhotoManager;
 import com.android.contacts.common.CallUtil;
-import com.android.contacts.common.ClipboardUtils;
 import com.android.contacts.common.GeoUtil;
 import com.android.contacts.common.model.Contact;
 import com.android.contacts.common.model.ContactLoader;
@@ -113,14 +110,11 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
     /** If the activity was triggered from a notification. */
     public static final String EXTRA_FROM_NOTIFICATION = "EXTRA_FROM_NOTIFICATION";
 
+    private CallDetailHeader mCallDetailHeader;
     private CallTypeHelper mCallTypeHelper;
     private PhoneNumberHelper mPhoneNumberHelper;
     private PhoneCallDetailsHelper mPhoneCallDetailsHelper;
     private TextView mHeaderTextView;
-    private View mHeaderOverlayView;
-    private ImageView mMainActionView;
-    private ImageButton mMainActionPushLayerView;
-    private ImageView mContactBackgroundView;
     private AsyncTaskExecutor mAsyncTaskExecutor;
     private ContactInfoHelper mContactInfoHelper;
 
@@ -129,8 +123,6 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
 
     /* package */ LayoutInflater mInflater;
     /* package */ Resources mResources;
-    /** Helper to load contact photos. */
-    private ContactPhotoManager mContactPhotoManager;
     /** Helper to make async queries to content resolver. */
     private CallDetailActivityQueryHandler mAsyncQueryHandler;
     /** Helper to get voicemail status messages. */
@@ -149,15 +141,6 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
 
     private ProximitySensorManager mProximitySensorManager;
     private final ProximitySensorListener mProximitySensorListener = new ProximitySensorListener();
-
-    /**
-     * The action mode used when the phone number is selected.  This will be non-null only when the
-     * phone number is selected.
-     */
-    private ActionMode mPhoneNumberActionMode;
-
-    private CharSequence mPhoneNumberLabelToCopy;
-    private CharSequence mPhoneNumberToCopy;
 
     /** Listener to changes in the proximity sensor state. */
     private class ProximitySensorListener implements ProximitySensorManager.Listener {
@@ -301,20 +284,16 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
 
         mCallTypeHelper = new CallTypeHelper(getResources());
         mPhoneNumberHelper = new PhoneNumberHelper(mResources);
+        mCallDetailHeader = new CallDetailHeader(this, mPhoneNumberHelper);
         mPhoneCallDetailsHelper = new PhoneCallDetailsHelper(mResources, mCallTypeHelper,
                 new PhoneNumberUtilsWrapper());
         mVoicemailStatusHelper = new VoicemailStatusHelperImpl();
         mAsyncQueryHandler = new CallDetailActivityQueryHandler(this);
         mHeaderTextView = (TextView) findViewById(R.id.header_text);
-        mHeaderOverlayView = findViewById(R.id.photo_text_bar);
         mStatusMessageView = findViewById(R.id.voicemail_status);
         mStatusMessageText = (TextView) findViewById(R.id.voicemail_status_message);
         mStatusMessageAction = (TextView) findViewById(R.id.voicemail_status_action);
-        mMainActionView = (ImageView) findViewById(R.id.main_action);
-        mMainActionPushLayerView = (ImageButton) findViewById(R.id.main_action_push_layer);
-        mContactBackgroundView = (ImageView) findViewById(R.id.contact_background);
         mDefaultCountryIso = GeoUtil.getCurrentCountryIso(this);
-        mContactPhotoManager = ContactPhotoManager.getInstance(this);
         mProximitySensorManager = new ProximitySensorManager(this, mProximitySensorListener);
         mContactInfoHelper = new ContactInfoHelper(this, GeoUtil.getCurrentCountryIso(this));
         getActionBar().setDisplayHomeAsUpEnabled(true);
@@ -407,17 +386,8 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        switch (keyCode) {
-            case KeyEvent.KEYCODE_CALL: {
-                // Make sure phone isn't already busy before starting direct call
-                TelephonyManager tm = (TelephonyManager)
-                        getSystemService(Context.TELEPHONY_SERVICE);
-                if (tm.getCallState() == TelephonyManager.CALL_STATE_IDLE) {
-                    startActivity(CallUtil.getCallIntent(
-                            Uri.fromParts(CallUtil.SCHEME_TEL, mNumber, null)));
-                    return true;
-                }
-            }
+        if (mCallDetailHeader.handleKeyDown(keyCode, event)) {
+            return true;
         }
 
         return super.onKeyDown(keyCode, event);
@@ -463,11 +433,10 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
                 PhoneCallDetails firstDetails = details[0];
                 mNumber = firstDetails.number.toString();
                 final int numberPresentation = firstDetails.numberPresentation;
-                final Uri contactUri = firstDetails.contactUri;
-                final Uri photoUri = firstDetails.photoUri;
 
                 // Set the details header, based on the first phone call.
                 mPhoneCallDetailsHelper.setCallDetailsHeader(mHeaderTextView, firstDetails);
+                mCallDetailHeader.updateViews(mNumber, numberPresentation, firstDetails);
 
                 // Cache the details about the phone number.
                 final boolean canPlaceCallsTo =
@@ -594,7 +563,8 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
                 ListView historyList = (ListView) findViewById(R.id.history);
                 historyList.setAdapter(
                         new CallDetailHistoryAdapter(CallDetailActivity.this, mInflater,
-                                mCallTypeHelper, details, hasVoicemail(), canPlaceCallsTo,
+                                mCallTypeHelper, details, hasVoicemail(),
+                                mCallDetailHeader.canPlaceCallsTo(),
                                 findViewById(R.id.controls)));
                 BackScrollManager.bind(
                         new ScrollableHeader() {
@@ -622,7 +592,7 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
                             }
                         },
                         historyList);
-                loadContactPhotos(photoUri);
+                mCallDetailHeader.loadContactPhotos(firstDetails.photoUri);
                 findViewById(R.id.call_detail).setVisibility(View.VISIBLE);
             }
         }
@@ -713,81 +683,6 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
             if (callCursor != null) {
                 callCursor.close();
             }
-        }
-    }
-
-    /** Load the contact photos and places them in the corresponding views. */
-    private void loadContactPhotos(Uri photoUri) {
-        mContactPhotoManager.loadPhoto(mContactBackgroundView, photoUri,
-                mContactBackgroundView.getWidth(), true);
-    }
-
-    static final class ViewEntry {
-        public final String text;
-        public final Intent primaryIntent;
-        /** The description for accessibility of the primary action. */
-        public final String primaryDescription;
-
-        public CharSequence label = null;
-        /** Icon for the secondary action. */
-        public int secondaryIcon = 0;
-        /** Intent for the secondary action. If not null, an icon must be defined. */
-        public Intent secondaryIntent = null;
-        /** The description for accessibility of the secondary action. */
-        public String secondaryDescription = null;
-
-        public ViewEntry(String text, Intent intent, String description) {
-            this.text = text;
-            primaryIntent = intent;
-            primaryDescription = description;
-        }
-
-        public void setSecondaryAction(int icon, Intent intent, String description) {
-            secondaryIcon = icon;
-            secondaryIntent = intent;
-            secondaryDescription = description;
-        }
-    }
-
-    /** Disables the call button area, e.g., for private numbers. */
-    private void disableCallButton() {
-        findViewById(R.id.call_and_sms).setVisibility(View.GONE);
-    }
-
-    /** Configures the call button area using the given entry. */
-    private void configureCallButton(ViewEntry entry) {
-        View convertView = findViewById(R.id.call_and_sms);
-        convertView.setVisibility(View.VISIBLE);
-
-        ImageView icon = (ImageView) convertView.findViewById(R.id.call_and_sms_icon);
-        View divider = convertView.findViewById(R.id.call_and_sms_divider);
-        TextView text = (TextView) convertView.findViewById(R.id.call_and_sms_text);
-
-        View mainAction = convertView.findViewById(R.id.call_and_sms_main_action);
-        mainAction.setOnClickListener(mPrimaryActionListener);
-        mainAction.setTag(entry);
-        mainAction.setContentDescription(entry.primaryDescription);
-        mainAction.setOnLongClickListener(mPrimaryLongClickListener);
-
-        if (entry.secondaryIntent != null) {
-            icon.setOnClickListener(mSecondaryActionListener);
-            icon.setImageResource(entry.secondaryIcon);
-            icon.setVisibility(View.VISIBLE);
-            icon.setTag(entry);
-            icon.setContentDescription(entry.secondaryDescription);
-            divider.setVisibility(View.VISIBLE);
-        } else {
-            icon.setVisibility(View.GONE);
-            divider.setVisibility(View.GONE);
-        }
-        text.setText(entry.text);
-
-        TextView label = (TextView) convertView.findViewById(R.id.call_and_sms_label);
-        if (TextUtils.isEmpty(entry.label)) {
-            label.setVisibility(View.GONE);
-        } else {
-            label.setText(entry.label);
-            label.setVisibility(View.VISIBLE);
         }
     }
 
@@ -921,76 +816,7 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
         mProximitySensorManager.disable(waitForFarState);
     }
 
-    /**
-     * If the phone number is selected, unselect it and return {@code true}.
-     * Otherwise, just {@code false}.
-     */
-    private boolean finishPhoneNumerSelectedActionModeIfShown() {
-        if (mPhoneNumberActionMode == null) return false;
-        mPhoneNumberActionMode.finish();
-        return true;
-    }
-
-    private void startPhoneNumberSelectedActionMode(View targetView) {
-        mPhoneNumberActionMode = startActionMode(new PhoneNumberActionModeCallback(targetView));
-    }
-
     private void closeSystemDialogs() {
         sendBroadcast(new Intent(Intent.ACTION_CLOSE_SYSTEM_DIALOGS));
-    }
-
-    private class PhoneNumberActionModeCallback implements ActionMode.Callback {
-        private final View mTargetView;
-        private final Drawable mOriginalViewBackground;
-
-        public PhoneNumberActionModeCallback(View targetView) {
-            mTargetView = targetView;
-
-            // Highlight the phone number view.  Remember the old background, and put a new one.
-            mOriginalViewBackground = mTargetView.getBackground();
-            mTargetView.setBackgroundColor(getResources().getColor(R.color.item_selected));
-        }
-
-        @Override
-        public boolean onCreateActionMode(ActionMode mode, Menu menu) {
-            if (TextUtils.isEmpty(mPhoneNumberToCopy)) return false;
-
-            getMenuInflater().inflate(R.menu.call_details_cab, menu);
-            return true;
-        }
-
-        @Override
-        public boolean onPrepareActionMode(ActionMode mode, Menu menu) {
-            return true;
-        }
-
-        @Override
-        public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
-            switch (item.getItemId()) {
-                case R.id.copy_phone_number:
-                    ClipboardUtils.copyText(CallDetailActivity.this, mPhoneNumberLabelToCopy,
-                            mPhoneNumberToCopy, true);
-                    mode.finish(); // Close the CAB
-                    return true;
-            }
-            return false;
-        }
-
-        @Override
-        public void onDestroyActionMode(ActionMode mode) {
-            mPhoneNumberActionMode = null;
-
-            // Restore the view background.
-            mTargetView.setBackground(mOriginalViewBackground);
-        }
-    }
-
-    /** Returns the given text, forced to be left-to-right. */
-    private static CharSequence forceLeftToRight(CharSequence text) {
-        StringBuilder sb = new StringBuilder();
-        sb.append(LEFT_TO_RIGHT_EMBEDDING);
-        sb.append(text);
-        sb.append(POP_DIRECTIONAL_FORMATTING);
-        return sb.toString();
     }
 }
