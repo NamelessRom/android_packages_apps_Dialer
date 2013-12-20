@@ -57,5 +57,4 @@
             android:fontFamily="sans-serif-light"
             />
       </LinearLayout>
-    </LinearLayout>
 </com.android.dialer.dialpad.DialpadKeyButton>
