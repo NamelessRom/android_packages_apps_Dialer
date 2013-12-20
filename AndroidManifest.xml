@@ -202,6 +202,17 @@
                 android:readPermission="android.permission.GLOBAL_SEARCH" />
         </provider>
 
+        <provider android:name=".calllog.CallLogSearchProvider"
+            android:authorities="com.android.dialer.calllog.calllogsearchprovider"
+            android:exported="true" >
+            <path-permission
+                android:pathPrefix="/search_suggest_query"
+                android:readPermission="android.permission.GLOBAL_SEARCH" />
+            <path-permission
+                android:pathPrefix="/search_suggest_shortcut"
+                android:readPermission="android.permission.GLOBAL_SEARCH" />
+        </provider>
+
         <!-- Backwards compatibility: "Phone" from Gingerbread and earlier -->
         <activity-alias android:name="DialtactsActivity"
             android:targetActivity=".DialtactsActivity"
