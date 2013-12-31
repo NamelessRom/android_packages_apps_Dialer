@@ -47,11 +47,7 @@
     <color name="background_dialpad">#f2020709</color>
 
     <!-- Primary color of dialpad text, including the call button -->
-    <color name="dialpad_primary_text_color">#ffffff</color>
-
-    <!-- Call button color separated from dialpad_primary_text_color, for better theme support -->
-    <color name="dialpad_call_button_color">#181818</color>
-
+    <color name="dialpad_primary_text_color">#33b5e5</color>
     <!-- Secondary color of dialpad text (used for the letters corresponding to each digit -->
     <color name="dialpad_secondary_text_color">#aaaaaa</color>
 
@@ -63,7 +59,6 @@
 
     <!-- Background color of the search box -->
     <color name="searchbox_background_color">#ffffff</color>
-
     <!-- Text color of the search box -->
     <color name="searchbox_text_color">#d3d3d3</color>
 
@@ -75,5 +70,4 @@
 
     <!-- Text color for no favorites message -->
     <color name="nofavorite_text_color">#777777</color>
-
 </resources>
