@@ -115,8 +115,6 @@ public class DialpadFragment extends Fragment
     private static final String TAG = DialpadFragment.class.getSimpleName();
     private Context mContext;
 
-    private Context mContext;
-
     private SettingsObserver mSettingsObserver;
 
     private View mFragmentView;
